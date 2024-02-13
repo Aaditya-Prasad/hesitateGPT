@@ -33,25 +33,25 @@ from model import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
-eval_interval = 2000
+eval_interval = 500
 log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
-wandb_log = False # disabled by default
-wandb_project = 'owt'
-wandb_run_name = 'gpt2' # 'run' + str(time.time())
+wandb_log = True # disabled by default
+wandb_project = 'enwik9'
+wandb_run_name = 'default' # 'run' + str(time.time())
 # data
-dataset = 'openwebtext'
-gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
-batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
+dataset = 'enwik9'
+gradient_accumulation_steps = 5 # used to simulate larger batch sizes
+batch_size = 16 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
 # model
-n_layer = 12
-n_head = 12
-n_embd = 768
+n_layer = 8
+n_head = 8
+n_embd = 624
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
@@ -74,7 +74,7 @@ dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read()) # overrides from command line or config file
+# exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 
@@ -115,8 +115,9 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 data_dir = os.path.join('data', dataset)
 train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
 val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+test_data = np.memmap(os.path.join(data_dir, 'test.bin'), dtype=np.uint16, mode='r')
 def get_batch(split):
-    data = train_data if split == 'train' else val_data
+    data = train_data if split == 'train' else val_data if split == 'val' else test_data
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
@@ -129,7 +130,7 @@ def get_batch(split):
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
-best_val_loss = 1e9
+best_test_bpc = 1e9
 
 # attempt to derive vocab_size from the dataset
 meta_path = os.path.join(data_dir, 'meta.pkl')
@@ -211,18 +212,27 @@ if ddp:
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
 def estimate_loss():
-    out = {}
+    loss_dict = {}
+    bpc_dict = {}
+
     model.eval()
-    for split in ['train', 'val']:
+    
+    for split in ['train', 'val', 'test']:
         losses = torch.zeros(eval_iters)
+        bpcs = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                logits, bpc, loss = model(X, Y)
+
             losses[k] = loss.item()
-        out[split] = losses.mean()
+            bpcs[k] = bpc.item()
+
+        loss_dict[split] = losses.mean()
+        bpc_dict[split] = bpc.mean()
+
     model.train()
-    return out
+    return loss_dict, bpc_dict
 
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(it):
@@ -258,25 +268,29 @@ while True:
 
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
-        losses = estimate_loss()
+        losses, bpc = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
+                "test/loss": losses['test'],
                 "lr": lr,
+                "train/bpc": bpc['train'],
+                "val/bpc": bpc['val'],
+                "test/bpc": bpc['test'],
                 "mfu": running_mfu*100, # convert to percentage
             })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
+        if bpc['test'] < best_test_bpc or always_save_checkpoint:
+            best_test_bpc = bpc['test']
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'model_args': model_args,
                     'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
+                    "best_test_bpc": best_test_bpc,
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
@@ -294,7 +308,7 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            logits, bpc, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')

@@ -7,4 +7,6 @@ __pycache__/
 *.pkl
 *.pt
 *.pyc
+data/enwik9/
+wandb/
 input.txt
