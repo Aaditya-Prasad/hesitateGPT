@@ -42,7 +42,7 @@ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'enwik8'
-wandb_run_name = 'persistent_XL' # 'run' + str(time.time())
+wandb_run_name = 'persistent_XL2' # 'run' + str(time.time())
 out_dir = 'out/' + wandb_project + '/' + wandb_run_name
 
 print("WRITING TO: ", out_dir)
@@ -50,7 +50,7 @@ print("WRITING TO: ", out_dir)
 # data
 dataset = 'enwik8'
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes, set to 1 since we have 8 mini-batches per memory training
-batch_size = 16 # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size = 32 # if gradient_accumulation_steps > 1, this is the micro-batch size
 mem_length = 256
 block_size = 1048 #- mem_length # we want to feed the model sequences of this size, it will prepend memory internally
 # model
@@ -60,7 +60,7 @@ n_embd = 624
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
-learning_rate = 6e-4 # max learning rate
+learning_rate = 8e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
@@ -70,7 +70,7 @@ grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 2000 # how many steps to warm up for
 lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
-min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+min_lr = 8e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
@@ -293,6 +293,8 @@ def estimate_memory_loss():
             _, avg_loss, avg_bpc = train_on_persistent_memory(batch, model)
             losses[k] = avg_loss.item()
             bpcs[k] = avg_bpc.item()
+            print(f"Memory Loss {split} {k}: {avg_loss.item()} {avg_bpc.item()}")
+
 
         loss_dict[split] = losses.mean()
         bpc_dict[split] = bpcs.mean()
