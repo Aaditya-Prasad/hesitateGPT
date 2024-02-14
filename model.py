@@ -186,9 +186,10 @@ class GPT(nn.Module):
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
 
-            log_probs = F.log_softmax(logits.view(-1, logits.size(-1)), dim=1)
-            correct_log_probs = log_probs.gather(1, targets.view(-1, 1))
-            bpc = -correct_log_probs.mean() / math.log(2)
+            # bits per character (bpc) is cross entropy converted to base 2
+            bpc = loss / math.log(2) 
+            # This gives a worse score than if we provided max context before each prediction
+            # but it evaluates much faster, since one forward pass calculates bpc for the whole sequence
 
 
         else:
@@ -320,7 +321,7 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, _, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options

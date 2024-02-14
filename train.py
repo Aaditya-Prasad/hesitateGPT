@@ -32,7 +32,7 @@ from model import GPTConfig, GPT
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = 'out'
+
 eval_interval = 500
 log_interval = 1
 eval_iters = 200
@@ -43,6 +43,10 @@ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 wandb_log = True # disabled by default
 wandb_project = 'enwik9'
 wandb_run_name = 'default' # 'run' + str(time.time())
+out_dir = 'out/' + wandb_project + '/' + wandb_run_name
+
+print("WRITING TO: ", out_dir)
+
 # data
 dataset = 'enwik9'
 gradient_accumulation_steps = 5 # used to simulate larger batch sizes
@@ -175,7 +179,7 @@ elif init_from == 'resume':
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
     model.load_state_dict(state_dict)
     iter_num = checkpoint['iter_num']
-    best_val_loss = checkpoint['best_val_loss']
+    best_test_bpc = checkpoint['best_test_bpc']
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
