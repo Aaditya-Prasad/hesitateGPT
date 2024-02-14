@@ -51,7 +51,8 @@ print("WRITING TO: ", out_dir)
 dataset = 'enwik9'
 gradient_accumulation_steps = 5 # used to simulate larger batch sizes
 batch_size = 16 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 1024
+mem_length = 24
+block_size = 1024 - mem_length # we want to feed the model sequences of this size, it will prepend memory internally
 # model
 n_layer = 8
 n_head = 8

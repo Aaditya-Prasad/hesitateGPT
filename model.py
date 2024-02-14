@@ -121,7 +121,18 @@ class GPT(nn.Module):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
-        self.config = config
+        self.mem_length = config.mem_length if hasattr(config, 'mem_length') else 0
+        if self.mem_length > 0:
+            print("GPT MEMORY LENGTH: ", self.mem_length)
+
+            # Since we train the embeddings layers, we can't guarantee any point in the embedding space will remain unused
+            # and thus we can't use it as a "mem" value. Instead we use a learned parameter to initialize the memory
+            self.initial_memory = nn.Parameter(torch.zeros(self.mem_length, config.n_embd))
+
+        # Externally, this model will take in a block_size of config.block_size
+        # Internally, it operates on a block_size of config.block_size + mem_length
+        # since it prepends the memory to the input
+        config.block_size = config.block_size + self.mem_length
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -147,7 +158,9 @@ class GPT(nn.Module):
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
-    def get_num_params(self, non_embedding=True):
+        self.config = config
+
+    def get_num_params(self, non_embedding=False):
         """
         Return the number of parameters in the model.
         For non-embedding count (default), the position embeddings get subtracted.
@@ -169,8 +182,14 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         device = idx.device
+
+        # Prepends initial memory to the input
+        if self.mem_length > 0:
+            mem = self.initial_memory.unsqueeze(0).expand(idx.size(0), -1, -1)
+            idx = torch.cat([mem, idx], dim=1)
+
         b, t = idx.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
@@ -183,7 +202,7 @@ class GPT(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
+            logits = self.lm_head(x[:, self.mem_length:, :])
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
 
             # bits per character (bpc) is cross entropy converted to base 2
@@ -318,8 +337,11 @@ class GPT(nn.Module):
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            sequence_length = self.config.block_size - self.mem_length
+            # if the sequence context is growing too long we must crop it to the maximum context length
+            idx_cond = idx if idx.size(1) <= sequence_length else idx[:, -sequence_length:]
+            # now we need to prepend the memory to the input
+            idx_cond = torch.cat([self.initial_memory.unsqueeze(0).expand(idx.size(0), -1, -1), idx_cond], dim=1)
             # forward the model to get the logits for the index in the sequence
             logits, _, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
