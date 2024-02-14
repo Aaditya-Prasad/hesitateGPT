@@ -41,18 +41,18 @@ always_save_checkpoint = True # if True, always save a checkpoint after each eva
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = True # disabled by default
-wandb_project = 'enwik9'
-wandb_run_name = 'non_persistent_extra' # 'run' + str(time.time())
+wandb_project = 'enwik8'
+wandb_run_name = 'non_persistent_XL' # 'run' + str(time.time())
 out_dir = 'out/' + wandb_project + '/' + wandb_run_name
 
 print("WRITING TO: ", out_dir)
 
 # data
-dataset = 'enwik9'
+dataset = 'enwik8'
 gradient_accumulation_steps = 5 # used to simulate larger batch sizes
 batch_size = 16 # if gradient_accumulation_steps > 1, this is the micro-batch size
-mem_length = 24
-block_size = 1048 - mem_length # we want to feed the model sequences of this size, it will prepend memory internally
+mem_length = 256
+block_size = 1048 #- mem_length # we want to feed the model sequences of this size, it will prepend memory internally
 # model
 n_layer = 8
 n_head = 8
