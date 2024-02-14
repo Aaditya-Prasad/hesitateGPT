@@ -33,25 +33,26 @@ from model import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 
-eval_interval = 500
+eval_interval = 250
 log_interval = 1
-eval_iters = 200
+eval_iters = 300
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = True # disabled by default
-wandb_project = 'enwik9'
-wandb_run_name = 'default' # 'run' + str(time.time())
+wandb_project = 'enwik8'
+wandb_run_name = 'non_persistent_XL' # 'run' + str(time.time())
 out_dir = 'out/' + wandb_project + '/' + wandb_run_name
 
 print("WRITING TO: ", out_dir)
 
 # data
-dataset = 'enwik9'
+dataset = 'enwik8'
 gradient_accumulation_steps = 5 # used to simulate larger batch sizes
 batch_size = 16 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 1024
+mem_length = 256
+block_size = 1048 #- mem_length # we want to feed the model sequences of this size, it will prepend memory internally
 # model
 n_layer = 8
 n_head = 8
@@ -75,7 +76,7 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-compile = True # use PyTorch 2.0 to compile the model to be faster
+compile = False # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 # exec(open('configurator.py').read()) # overrides from command line or config file
@@ -147,7 +148,7 @@ if os.path.exists(meta_path):
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
+                  bias=bias, vocab_size=None, dropout=dropout, mem_length=mem_length) # start with model_args from command line
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -286,7 +287,20 @@ while True:
                 "test/bpc": bpc['test'],
                 "mfu": running_mfu*100, # convert to percentage
             })
-        if bpc['test'] < best_test_bpc or always_save_checkpoint:
+        if bpc['test'] < best_test_bpc:
+            best_test_bpc = bpc['test']
+            if iter_num > 0:
+                checkpoint = {
+                    'model': raw_model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'model_args': model_args,
+                    'iter_num': iter_num,
+                    "best_test_bpc": best_test_bpc,
+                    'config': config,
+                }
+                print(f"New Record BPC {best_test_bpc}!, saving checkpoint to {out_dir}")
+                torch.save(checkpoint, os.path.join(out_dir, 'best_ckpt.pt'))
+        if always_save_checkpoint:
             best_test_bpc = bpc['test']
             if iter_num > 0:
                 checkpoint = {

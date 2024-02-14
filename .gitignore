@@ -8,5 +8,6 @@ __pycache__/
 *.pt
 *.pyc
 data/enwik9/
+data/enwik8/
 wandb/
 input.txt
