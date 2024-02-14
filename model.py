@@ -114,6 +114,7 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    mem_length: int = 24
 
 class GPT(nn.Module):
 
@@ -122,9 +123,8 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.mem_length = config.mem_length if hasattr(config, 'mem_length') else 0
+        print("GPT MEMORY LENGTH: ", self.mem_length)
         if self.mem_length > 0:
-            print("GPT MEMORY LENGTH: ", self.mem_length)
-
             # Since we train the embeddings layers, we can't guarantee any point in the embedding space will remain unused
             # and thus we can't use it as a "mem" value. Instead we use a learned parameter to initialize the memory
             self.initial_memory = nn.Parameter(torch.zeros(self.mem_length, config.n_embd))
@@ -132,11 +132,11 @@ class GPT(nn.Module):
         # Externally, this model will take in a block_size of config.block_size
         # Internally, it operates on a block_size of config.block_size + mem_length
         # since it prepends the memory to the input
-        config.block_size = config.block_size + self.mem_length
+        self.block_size = config.block_size + self.mem_length
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
+            wpe = nn.Embedding(self.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
@@ -183,19 +183,22 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None):
         device = idx.device
 
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t + self.mem_length, dtype=torch.long, device=device) # shape (t)
+
+        x = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
         # Prepends initial memory to the input
         if self.mem_length > 0:
             mem = self.initial_memory.unsqueeze(0).expand(idx.size(0), -1, -1)
-            idx = torch.cat([mem, idx], dim=1)
+            x = torch.cat([mem, x], dim=1)
+            
 
-        b, t = idx.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        x = self.transformer.drop(x + pos_emb)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
@@ -337,11 +340,8 @@ class GPT(nn.Module):
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
         for _ in range(max_new_tokens):
-            sequence_length = self.config.block_size - self.mem_length
             # if the sequence context is growing too long we must crop it to the maximum context length
-            idx_cond = idx if idx.size(1) <= sequence_length else idx[:, -sequence_length:]
-            # now we need to prepend the memory to the input
-            idx_cond = torch.cat([self.initial_memory.unsqueeze(0).expand(idx.size(0), -1, -1), idx_cond], dim=1)
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
             logits, _, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
