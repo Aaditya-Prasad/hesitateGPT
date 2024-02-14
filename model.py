@@ -10,6 +10,7 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 import math
 import inspect
 from dataclasses import dataclass
+from einops import repeat, rearrange
 
 import torch
 import torch.nn as nn
@@ -90,6 +91,21 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
+    
+# class MEM_FNN(nn.Module):
+#     def __init__(self, mem_length, n_embd):
+#         super().__init__()
+#         self.fc = nn.Linear(mem_length * 2 * n_embd, mem_length * n_embd)
+#         self.gelu = nn.GELU()
+#         self.mem_length = mem_length
+#         self.n_embd = n_embd
+
+#     def forward(self, x):
+#         x = rearrange(x, 'b m e -> b (m e)') # Flatten the memory
+#         x = self.fc(x)
+#         x = self.gelu(x)
+#         x = rearrange(x, 'b (m e) -> b m e', m=self.mem_length, e=self.n_embd) # Unflatten the memory
+#         return x
 
 class Block(nn.Module):
 
@@ -99,6 +115,12 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
+        print("You have almost made a block!")
+
+        mem_length = config.mem_length if hasattr(config, 'mem_length') else 0
+        # self.mem_ffn = MEM_FNN(mem_length, config.n_embd) # We call this directly in GPT's forward pass
+        self.mem_fnn = MLP(config)
+        print("You have made a block!")
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
@@ -128,6 +150,7 @@ class GPT(nn.Module):
             # Since we train the embeddings layers, we can't guarantee any point in the embedding space will remain unused
             # and thus we can't use it as a "mem" value. Instead we use a learned parameter to initialize the memory
             self.initial_memory = nn.Parameter(torch.zeros(self.mem_length, config.n_embd))
+        print("HI")
 
         # Externally, this model will take in a block_size of config.block_size
         # Internally, it operates on a block_size of config.block_size + mem_length
@@ -141,6 +164,8 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
+        print("HI2")
+
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -180,11 +205,14 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, memories=None):
         device = idx.device
-
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        if memories is None:
+            memories = torch.zeros([0])
+
         pos = torch.arange(0, t + self.mem_length, dtype=torch.long, device=device) # shape (t)
 
         x = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
@@ -195,17 +223,28 @@ class GPT(nn.Module):
             x = torch.cat([mem, x], dim=1)
             
 
-
         # forward the GPT model itself
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(x + pos_emb)
         for block in self.transformer.h:
+            # Integrates old memories from the very first block onwards 
+            if memories.shape[0] > 0:
+                old_mem = memories[0]
+                new_mem = x[:, :self.mem_length, :]
+                with torch.no_grad():
+                    # mem = torch.cat([old_mem, new_mem], dim=1)
+                    old_mem = block.mem_fnn(old_mem)
+                # mem = block.mem_ffn(mem)
+                mem = old_mem + new_mem
+                x = torch.cat([mem, x[:, self.mem_length:, :]], dim=1)
+                memories = memories[1:]
             x = block(x)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x[:, self.mem_length:, :])
+            logits = self.lm_head(x[:, self.mem_length:, :]).contiguous()
+            targets = targets.contiguous()
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
 
             # bits per character (bpc) is cross entropy converted to base 2
@@ -219,6 +258,10 @@ class GPT(nn.Module):
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
             bpc = None
+
+        if self.mem_length > 0:
+            memory = x[:, :self.mem_length, :]
+            return logits, bpc, loss, memory 
 
         return logits, bpc, loss
 
@@ -339,11 +382,20 @@ class GPT(nn.Module):
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
+
+        # Have to do this beforehand in case the initial input is too big 
+        if idx.size(1) <= self.config.block_size:
+            idx_cond = idx
+        else:
+            idx_cond = idx[:, -self.config.block_size:]
+
+        memories = None
+
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it to the maximum context length
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+
+
             # forward the model to get the logits for the index in the sequence
-            logits, _, _ = self(idx_cond)
+            logits, _, _, memory = self(idx_cond, memories)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
@@ -356,5 +408,17 @@ class GPT(nn.Module):
             idx_next = torch.multinomial(probs, num_samples=1)
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
+
+            if idx.size(1) <= self.config.block_size:
+                idx_cond = idx
+            else:
+                idx_cond = idx[:, -self.config.block_size:]
+                # Every context length, we save a new memory
+                # Currently, the most recent memory is conditioned on last in the forward pass
+                # To switch this, we use torch.cat([memory.unsqueeze(0), memories], dim=0)
+                memories = torch.cat([memories, memory.unsqueeze(0)], dim=0) if memories is not None else memory.unsqueeze(0) 
+                if memories.shape[0] > self.config.n_layer:
+                    memories = memories[1:]
+                
 
         return idx

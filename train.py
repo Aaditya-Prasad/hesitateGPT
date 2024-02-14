@@ -42,14 +42,14 @@ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'enwik8'
-wandb_run_name = 'non_persistent_XL' # 'run' + str(time.time())
+wandb_run_name = 'persistent_XL' # 'run' + str(time.time())
 out_dir = 'out/' + wandb_project + '/' + wandb_run_name
 
 print("WRITING TO: ", out_dir)
 
 # data
 dataset = 'enwik8'
-gradient_accumulation_steps = 5 # used to simulate larger batch sizes
+gradient_accumulation_steps = 1 # used to simulate larger batch sizes, set to 1 since we have 8 mini-batches per memory training
 batch_size = 16 # if gradient_accumulation_steps > 1, this is the micro-batch size
 mem_length = 256
 block_size = 1048 #- mem_length # we want to feed the model sequences of this size, it will prepend memory internally
@@ -132,6 +132,45 @@ def get_batch(split):
     else:
         x, y = x.to(device), y.to(device)
     return x, y
+
+# When we train persistent memory, we need to simulate multiple context lengths of data
+def get_persistent_memory_batch(split):
+    data = train_data if split == 'train' else val_data if split == 'val' else test_data
+    mem_block_size = block_size * 9 # We can condition on at most 8 blocks of memory
+    ix = torch.randint(len(data) - mem_block_size, (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+mem_block_size]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+mem_block_size]).astype(np.int64)) for i in ix])
+    if device_type == 'cuda':
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+    return x, y
+
+def train_on_persistent_memory(batch, model):
+    x, y = batch
+
+    x_chunks = torch.split(x, block_size, dim=1)
+    y_chunks = torch.split(y, block_size, dim=1)
+    memories = None
+
+    losses = []
+    bpcs = []
+    total_loss = 0
+
+    for x_chunk, y_chunk in zip(x_chunks, y_chunks):
+        with ctx:
+            logits, bpc, loss, memory = model(x_chunk, y_chunk, memories)
+            total_loss += loss # This is what we will backprop on
+            losses.append(loss) # This is so we can compute a per-sample mean for logging
+            bpcs.append(bpc)
+
+            memories = torch.cat([memories, memory.unsqueeze(0)], dim=0) if memories is not None else memory.unsqueeze(0)
+    
+    losses = torch.stack(losses)
+    bpcs = torch.stack(bpcs)
+    
+    return total_loss, losses.mean(), bpcs.mean()
+
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -228,13 +267,35 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, bpc, loss = model(X, Y)
+                logits, bpc, loss, memory = model(X, Y)
 
             losses[k] = loss.item()
             bpcs[k] = bpc.item()
 
         loss_dict[split] = losses.mean()
         bpc_dict[split] = bpc.mean()
+
+    model.train()
+    return loss_dict, bpc_dict
+
+@torch.no_grad()
+def estimate_memory_loss():
+    loss_dict = {}
+    bpc_dict = {}
+
+    model.eval()
+    
+    for split in ['train', 'val', 'test']:
+        losses = torch.zeros(eval_iters)
+        bpcs = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            batch = get_persistent_memory_batch(split)
+            _, avg_loss, avg_bpc = train_on_persistent_memory(batch, model)
+            losses[k] = avg_loss.item()
+            bpcs[k] = avg_bpc.item()
+
+        loss_dict[split] = losses.mean()
+        bpc_dict[split] = bpcs.mean()
 
     model.train()
     return loss_dict, bpc_dict
@@ -259,7 +320,7 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+X, Y = get_persistent_memory_batch('train') # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -273,7 +334,7 @@ while True:
 
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
-        losses, bpc = estimate_loss()
+        losses, bpc = estimate_memory_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
             wandb.log({
@@ -326,12 +387,11 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, bpc, loss = model(X, Y)
-            loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            total_loss, loss, bpc = train_on_persistent_memory((X, Y), model)
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        X, Y = get_persistent_memory_batch('train')
         # backward pass, with gradient scaling if training in fp16
-        scaler.scale(loss).backward()
+        scaler.scale(total_loss).backward()
     # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
