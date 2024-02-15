@@ -157,6 +157,9 @@ class GPT(nn.Module):
         # since it prepends the memory to the input
         self.block_size = config.block_size + self.mem_length
 
+        self.mem_norm = LayerNorm(config.n_embd, bias=config.bias)
+        self.nonlinear = nn.GELU()
+
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(self.block_size, config.n_embd),
@@ -235,7 +238,7 @@ class GPT(nn.Module):
                     # mem = torch.cat([old_mem, new_mem], dim=1)
                     old_mem = block.mem_fnn(old_mem)
                 # mem = block.mem_ffn(mem)
-                mem = old_mem + new_mem
+                mem = self.mem_norm(self.nonlinear(old_mem + new_mem))
                 x = torch.cat([mem, x[:, self.mem_length:, :]], dim=1)
                 memories = memories[1:]
             x = block(x)
