@@ -41,8 +41,14 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+
+        self.mem_length = config.mem_length if hasattr(config, 'mem_length') else 0
+        self.con_length = config.block_size
+
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if self.mem_length > 0:
+            self.register_buffer("mem_bias", self.causal_memory_mask())
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
@@ -61,7 +67,10 @@ class CausalSelfAttention(nn.Module):
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            if self.mem_length == 0:
+                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            else:
+                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=self.mem_bias[:, :, :T, :T], dropout_p=self.dropout if self.training else 0)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -74,6 +83,33 @@ class CausalSelfAttention(nn.Module):
         # output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
+    
+    def causal_memory_mask(self):
+        """
+        Retains causality for context tokens and allows the latter half of them to attend to memory
+
+        Memory tokens can attend to the former half of context tokens, but not to the latter half
+        """
+        M = self.mem_length
+        C = self.con_length
+        T = M + C
+
+        mask = torch.zeros(T, T, dtype=torch.bool)
+        
+        # The latter half of context tokens can attend to memory tokens
+        mask[M + T//2 - 1:, :M] = True # shift by 1 since tokens can attend to themselves
+
+        # Memory tokens can attend to the former half of context tokens
+        mask[:M, :M + T//2] = True
+        
+        # Context tokens can only attend to previous context tokens
+        mask[M:, M:] = torch.tril(torch.ones(C, C, dtype=torch.bool))
+        
+        # Broadcast to the batch size and head dimensions
+        mask = mask.view(1, 1, T, T)
+        
+        return mask
+    
 
 class MLP(nn.Module):
 
@@ -192,11 +228,13 @@ class GPT(nn.Module):
         # Prepends initial memory to the input
         if self.mem_length > 0:
             mem = self.initial_memory.unsqueeze(0).expand(idx.size(0), -1, -1)
-            x = torch.cat([mem, x], dim=1)            
-        
+            x = torch.cat([mem, x], dim=1)
+            
+
+
+        # forward the GPT model itself
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(x + pos_emb)
-
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
@@ -210,6 +248,7 @@ class GPT(nn.Module):
             bpc = loss / math.log(2) 
             # This gives a worse score than if we provided max context before each prediction
             # but it evaluates much faster, since one forward pass calculates bpc for the whole sequence
+
 
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
