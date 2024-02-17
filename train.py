@@ -42,7 +42,7 @@ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'enwik8'
-wandb_run_name = 'persistent_06lr_norm' # 'run' + str(time.time())
+wandb_run_name = 'persistent_06lr_norm_fix' # 'run' + str(time.time())
 out_dir = 'out/' + wandb_project + '/' + wandb_run_name
 
 print("WRITING TO: ", out_dir)

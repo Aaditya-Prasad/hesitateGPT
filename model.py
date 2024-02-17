@@ -42,8 +42,14 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+
+        self.mem_length = config.mem_length if hasattr(config, 'mem_length') else 0
+        self.con_length = config.block_size
+
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if self.mem_length > 0:
+            self.register_buffer("mem_bias", self.memory_causal_mask())
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
@@ -62,7 +68,10 @@ class CausalSelfAttention(nn.Module):
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            if self.mem_length == 0:
+                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            else:
+                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=self.mem_bias[:, :, :T, :T], dropout_p=self.dropout if self.training else 0)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -75,6 +84,30 @@ class CausalSelfAttention(nn.Module):
         # output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
+    
+    def memory_causal_mask(self):
+        """
+        Preserves causality for context tokens but allows memory tokens to attend to and from everything
+        """
+        M = self.mem_length
+        C = self.con_length
+        T = M + C
+
+        mask = torch.zeros(T, T, dtype=torch.bool)
+        
+        # Memory tokens can attend to everything
+        mask[:M, :] = True
+
+        # Everything can attend to memory tokens
+        mask[:, :M] = True
+        
+        # Context tokens can only attend to previous context tokens
+        mask[M:, M:] = torch.tril(torch.ones(C, C, dtype=torch.bool))
+        
+        # Broadcast to the batch size and head dimensions
+        mask = mask.view(1, 1, T, T)
+        
+        return mask
 
 class MLP(nn.Module):
 
