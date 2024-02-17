@@ -49,7 +49,7 @@ class CausalSelfAttention(nn.Module):
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if self.mem_length > 0:
-            self.register_buffer("mem_bias", self.causal_memory_mask_mask())
+            self.register_buffer("mem_bias", self.causal_memory_mask())
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
