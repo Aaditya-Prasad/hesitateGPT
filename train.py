@@ -42,7 +42,7 @@ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'enwik8'
-wandb_run_name = 'persistent_06lr_norm_fix' # 'run' + str(time.time())
+wandb_run_name = 'persistent_06lr2' # 'run' + str(time.time())
 out_dir = 'out/' + wandb_project + '/' + wandb_run_name
 
 print("WRITING TO: ", out_dir)
@@ -364,18 +364,18 @@ while True:
                 print(f"New Record BPC {best_test_bpc}!, saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'best_ckpt.pt'))
         if always_save_checkpoint:
-            best_test_bpc = bpc['test']
+            bpcf = bpc['test']
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'model_args': model_args,
                     'iter_num': iter_num,
-                    "best_test_bpc": best_test_bpc,
+                    "best_test_bpc": bpcf,
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, f'ckpt{bpcf}.pt'))
     if iter_num == 0 and eval_only:
         break
 
