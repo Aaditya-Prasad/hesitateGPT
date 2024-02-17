@@ -192,13 +192,11 @@ class GPT(nn.Module):
         # Prepends initial memory to the input
         if self.mem_length > 0:
             mem = self.initial_memory.unsqueeze(0).expand(idx.size(0), -1, -1)
-            x = torch.cat([mem, x], dim=1)
-            
-
-
-        # forward the GPT model itself
+            x = torch.cat([mem, x], dim=1)            
+        
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(x + pos_emb)
+
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
@@ -212,7 +210,6 @@ class GPT(nn.Module):
             bpc = loss / math.log(2) 
             # This gives a worse score than if we provided max context before each prediction
             # but it evaluates much faster, since one forward pass calculates bpc for the whole sequence
-
 
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
