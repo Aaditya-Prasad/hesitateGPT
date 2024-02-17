@@ -41,14 +41,14 @@ init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'enwik8'
-wandb_run_name = 'eval_non_persistent_XL_fix' # 'run' + str(time.time())
+wandb_run_name = 'eval_baseline' # 'run' + str(time.time())
 out_dir = 'out/' + wandb_project + '/' + wandb_run_name[5:] #gets rid of 'eval_' in the name
 
 print("WRITING TO: ", out_dir)
 
 # data
 dataset = 'enwik8'
-mem_length = 256
+mem_length = 0
 block_size = 1048 #- mem_length # we want to feed the model sequences of this size, it will prepend memory internally
 # model
 n_layer = 8
@@ -138,7 +138,7 @@ class enwikIterator():
 def eval_non_persistent(batch, model):
     x, y = batch
 
-    logits, _, _, memory = model(x)
+    logits, _, _ = model(x)
     target = y[:, [-1]]
     bpc = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=-1) / math.log(2)
 
@@ -228,7 +228,7 @@ model.eval()
 model = model.to(device_type)
 n_params = sum([p.nelement() for p in model.parameters()])
 print(f"number of parameters: {n_params}")
-bpc_dict = evaluate_memory_bpc()
+bpc_dict = evaluate_bpc()
 if wandb_log and master_process:
     wandb.log({
         'val_bpc': bpc_dict['val'].item(),
