@@ -300,9 +300,8 @@ while True:
                 }
                 print(f"New Record BPC {best_test_bpc}!, saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'best_ckpt.pt'))
-        bpc = bpc['test'].item()
         if always_save_checkpoint:
-            best_test_bpc = bpc['test']
+            bpcf = bpc['test']
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
@@ -313,7 +312,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, f'ckpt{bpc}.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, f'ckpt_{bpcf}.pt'))
     if iter_num == 0 and eval_only:
         break
 
