@@ -97,7 +97,7 @@ class CausalSelfAttention(nn.Module):
         mask = torch.zeros(T, T, dtype=torch.bool)
         
         # The latter half of context tokens can attend to memory tokens
-        mask[M + T//2:, :M] = True
+        mask[M + T//2 - 1:, :M] = True # shift by 1 since tokens can attend to themselves
 
         # Memory tokens can attend to the former half of context tokens
         mask[:M, :M + T//2] = True
@@ -110,10 +110,6 @@ class CausalSelfAttention(nn.Module):
         
         return mask
     
-    def memory_mask(self):
-        """
-        
-        """
 
 class MLP(nn.Module):
 
