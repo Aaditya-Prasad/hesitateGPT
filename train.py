@@ -371,11 +371,11 @@ while True:
                     'optimizer': optimizer.state_dict(),
                     'model_args': model_args,
                     'iter_num': iter_num,
-                    "best_test_bpc": bpcf,
+                    "best_test_bpc": best_test_bpc,
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, f'ckpt{bpcf}.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, f'ckpt_{bpcf}.pt'))
     if iter_num == 0 and eval_only:
         break
 
