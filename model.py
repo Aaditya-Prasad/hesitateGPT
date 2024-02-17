@@ -151,12 +151,7 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
-        print("You have almost made a block!")
-
-        mem_length = config.mem_length if hasattr(config, 'mem_length') else 0
-        # self.mem_ffn = MEM_FNN(mem_length, config.n_embd) # We call this directly in GPT's forward pass
         self.mem_fnn = MLP(config)
-        print("You have made a block!")
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
@@ -186,7 +181,6 @@ class GPT(nn.Module):
             # Since we train the embeddings layers, we can't guarantee any point in the embedding space will remain unused
             # and thus we can't use it as a "mem" value. Instead we use a learned parameter to initialize the memory
             self.initial_memory = nn.Parameter(torch.zeros(self.mem_length, config.n_embd))
-        print("HI")
 
         # Externally, this model will take in a block_size of config.block_size
         # Internally, it operates on a block_size of config.block_size + mem_length
@@ -203,7 +197,6 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        print("HI2")
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:

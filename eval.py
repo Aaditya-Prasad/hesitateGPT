@@ -39,10 +39,10 @@ from model import GPTConfig, GPT
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
-wandb_log = True # disabled by default
+wandb_log = False # disabled by default
 wandb_project = 'enwik8'
 wandb_run_name = 'eval_persistent_06lr_norm_fix' # 'run' + str(time.time())
-out_dir = 'out/' + wandb_project + '/' + wandb_run_name
+out_dir = 'out/' + wandb_project + '/' + wandb_run_name[5:] #gets rid of 'eval_' in the name
 
 print("WRITING TO: ", out_dir)
 
@@ -79,17 +79,13 @@ if ddp:
     torch.cuda.set_device(device)
     master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
     seed_offset = ddp_rank # each process gets a different seed
-    # world_size number of processes will be training simultaneously, so we can scale
-    # down the desired gradient accumulation iterations per process proportionally
-    assert gradient_accumulation_steps % ddp_world_size == 0
-    gradient_accumulation_steps //= ddp_world_size
+
 else:
     # if not ddp, we are running on a single gpu, and one process
     master_process = True
     seed_offset = 0
     ddp_world_size = 1
-tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
-print(f"tokens per iteration will be: {tokens_per_iter:,}")
+
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
@@ -121,8 +117,8 @@ class enwikIterator():
         if index > self.data_len():
             raise StopIteration
         
-        x = torch.from_numpy((self.data[index:index+self.block_size]).astype(np.int64))
-        y = torch.from_numpy((self.data[index+1:index+self.block_size+1]).astype(np.int64))
+        x = torch.from_numpy((self.data[index:index+self.block_size]).astype(np.int64)).unsqueeze(0) # B T
+        y = torch.from_numpy((self.data[index+1:index+self.block_size+1]).astype(np.int64)).unsqueeze(0)
 
         if self.device_type == 'cuda':
             x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -142,16 +138,16 @@ class enwikIterator():
 def eval_on_persistent_memory(batch, model):
     x, y = batch
 
-    x_chunks = torch.split(x, block_size, dim=1)
-    y_chunks = torch.split(y, block_size, dim=1)
+    x_chunks = torch.split(x, block_size, dim=-1)
+    y_chunks = torch.split(y, block_size, dim=-1)
     memories = None
 
     bpcs = []
 
     for x_chunk, y_chunk in zip(x_chunks, y_chunks):
         with ctx:
-            logits, _, _, memory = model(x_chunk, memories)
-            target = y_chunk[:, [-1], :]
+            logits, _, _, memory = model(x_chunk, memories=memories)
+            target = y_chunk[:, [-1]]
             bpc = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=-1) / math.log(2)
             bpcs.append(bpc)
 
@@ -198,7 +194,7 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
 
 print(f"Resuming training from {out_dir}")
 # resume training from a checkpoint.
-ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+ckpt_path = os.path.join(out_dir, 'best_ckpt.pt')
 checkpoint = torch.load(ckpt_path, map_location=device)
 checkpoint_model_args = checkpoint['model_args']
 # force these config attributes to be equal otherwise we can't even resume training
@@ -242,6 +238,7 @@ if wandb_log and master_process:
 
 # Eval
 model.eval()
+model = model.to(device_type)
 n_params = sum([p.nelement() for p in model.parameters()])
 print(f"number of parameters: {n_params}")
 bpc_dict = evaluate_memory_bpc()
