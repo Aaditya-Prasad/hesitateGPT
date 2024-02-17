@@ -49,7 +49,7 @@ class CausalSelfAttention(nn.Module):
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if self.mem_length > 0:
-            self.register_buffer("mem_bias", self.memory_causal_mask())
+            self.register_buffer("mem_bias", self.causal_memory_mask_mask())
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
@@ -85,9 +85,12 @@ class CausalSelfAttention(nn.Module):
         y = self.resid_dropout(self.c_proj(y))
         return y
     
-    def memory_causal_mask(self):
+
+    def causal_memory_mask(self):
         """
-        Preserves causality for context tokens but allows memory tokens to attend to and from everything
+        Retains causality for context tokens and allows the latter half of them to attend to memory
+
+        Memory tokens can attend to the former half of context tokens, but not to the latter half
         """
         M = self.mem_length
         C = self.con_length
@@ -95,11 +98,11 @@ class CausalSelfAttention(nn.Module):
 
         mask = torch.zeros(T, T, dtype=torch.bool)
         
-        # Memory tokens can attend to everything
-        mask[:M, :] = True
+        # The latter half of context tokens can attend to memory tokens
+        mask[M + T//2 - 1:, :M] = True # shift by 1 since tokens can attend to themselves
 
-        # Everything can attend to memory tokens
-        mask[:, :M] = True
+        # Memory tokens can attend to the former half of context tokens
+        mask[:M, :M + T//2] = True
         
         # Context tokens can only attend to previous context tokens
         mask[M:, M:] = torch.tril(torch.ones(C, C, dtype=torch.bool))
@@ -258,19 +261,16 @@ class GPT(nn.Module):
             mem = self.initial_memory.unsqueeze(0).expand(idx.size(0), -1, -1)
             x = torch.cat([mem, x], dim=1)
             
-
-        # forward the GPT model itself
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(x + pos_emb)
+
         for block in self.transformer.h:
             # Integrates old memories from the very first block onwards 
             if memories.shape[0] > 0:
                 old_mem = memories[0]
                 new_mem = x[:, :self.mem_length, :]
                 with torch.no_grad():
-                    # mem = torch.cat([old_mem, new_mem], dim=1)
                     old_mem = block.mem_fnn(old_mem)
-                # mem = block.mem_ffn(mem)
                 mem = self.mem_norm(self.nonlinear(old_mem + new_mem))
                 x = torch.cat([mem, x[:, self.mem_length:, :]], dim=1)
                 memories = memories[1:]
@@ -428,8 +428,6 @@ class GPT(nn.Module):
         memories = None
 
         for _ in range(max_new_tokens):
-
-
             # forward the model to get the logits for the index in the sequence
             logits, _, _, memory = self(idx_cond, memories)
             # pluck the logits at the final step and scale by desired temperature
@@ -456,5 +454,4 @@ class GPT(nn.Module):
                 if memories.shape[0] > self.config.n_layer:
                     memories = memories[1:]
                 
-
         return idx
