@@ -48,7 +48,7 @@ class CausalSelfAttention(nn.Module):
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if self.mem_length > 0:
-            self.register_buffer("mem_bias", self.memory_causal_mask())
+            self.register_buffer("mem_bias", self.causal_memory_mask())
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
@@ -84,9 +84,11 @@ class CausalSelfAttention(nn.Module):
         y = self.resid_dropout(self.c_proj(y))
         return y
     
-    def memory_causal_mask(self):
+    def causal_memory_mask(self):
         """
-        Preserves causality for context tokens but allows memory tokens to attend to and from everything
+        Retains causality for context tokens and allows the latter half of them to attend to memory
+
+        Memory tokens can attend to the former half of context tokens, but not to the latter half
         """
         M = self.mem_length
         C = self.con_length
@@ -94,11 +96,11 @@ class CausalSelfAttention(nn.Module):
 
         mask = torch.zeros(T, T, dtype=torch.bool)
         
-        # Memory tokens can attend to everything
-        mask[:M, :] = True
+        # The latter half of context tokens can attend to memory tokens
+        mask[M + T//2:, :M] = True
 
-        # Everything can attend to memory tokens
-        mask[:, :M] = True
+        # Memory tokens can attend to the former half of context tokens
+        mask[:M, :M + T//2] = True
         
         # Context tokens can only attend to previous context tokens
         mask[M:, M:] = torch.tril(torch.ones(C, C, dtype=torch.bool))
@@ -107,6 +109,11 @@ class CausalSelfAttention(nn.Module):
         mask = mask.view(1, 1, T, T)
         
         return mask
+    
+    def memory_mask(self):
+        """
+        
+        """
 
 class MLP(nn.Module):
 
